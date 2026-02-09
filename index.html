@@ -7,6 +7,7 @@
     <title>LingTier - Adaptive Cognitive Tiers</title>
     <meta name="description" content="Compare Gemini 3's thinking levels: Low, Medium, High with parallel analysis">
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
     <style>
         .dropzone-active {
             border-color: #22C55E !important;
@@ -258,6 +259,8 @@
         let currentProjectStats = null;
         let cacheExpiresAt = null;
         let cacheTimerInterval = null;
+        let cacheRefreshInFlight = false;
+        const CACHE_REFRESH_THRESHOLD_MS = 2 * 60 * 1000;
 
         // DOM Elements
         const dropzone = document.getElementById('dropzone');
@@ -305,7 +308,10 @@
                 .replace(/<br>[-•] /g, '<br>• ')
                 .replace(/<br>(\d+)\. /g, '<br>$1. ');
 
-            return result;
+            return DOMPurify.sanitize(result, {
+                ALLOWED_TAGS: ['h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'code', 'br', 'strong', 'em', 'span', 'div', 'a'],
+                ALLOWED_ATTR: ['class', 'href', 'target', 'rel']
+            });
         }
 
         // Display error in specific column with retry
@@ -334,11 +340,12 @@
             document.getElementById(`${level}Result`).innerHTML = '<span class="animate-pulse text-gray-500">Retrying...</span>';
 
             try {
+                await ensureCacheReady();
                 const res = await fetch('/analyze', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        file_content: fileContent,
+                        file_content: getAnalyzeFileContent(),
                         prompt: prompt,
                         level: level,
                         grounding: grounding,
@@ -382,7 +389,36 @@
                     cacheTimer.classList.add('text-red-400');
                     clearInterval(cacheTimerInterval);
                 }
+
+                if (remaining > 0 && remaining <= CACHE_REFRESH_THRESHOLD_MS) {
+                    void maybeAutoRefreshCache();
+                }
             }, 1000);
+        }
+
+        async function maybeAutoRefreshCache() {
+            if (cacheRefreshInFlight || !cacheCheck.checked || !fileContent) return;
+            cacheRefreshInFlight = true;
+            try {
+                await cacheContent(true);
+            } finally {
+                cacheRefreshInFlight = false;
+            }
+        }
+
+        function shouldUseCache() {
+            return cacheCheck.checked && currentCacheId && cacheExpiresAt && cacheExpiresAt > Date.now();
+        }
+
+        function getAnalyzeFileContent() {
+            return shouldUseCache() ? '' : fileContent;
+        }
+
+        async function ensureCacheReady() {
+            if (!cacheCheck.checked || !fileContent) return;
+            if (!currentCacheId || !cacheExpiresAt || cacheExpiresAt <= Date.now()) {
+                await cacheContent();
+            }
         }
 
         function toggleSkipDetails() {
@@ -512,7 +548,7 @@
             });
         }
 
-        async function cacheContent() {
+        async function cacheContent(isAutoRefresh = false) {
             try {
                 const res = await fetch('/cache-content', {
                     method: 'POST',
@@ -523,9 +559,11 @@
                     const data = await res.json();
                     currentCacheId = data.cache_id;
                     startCacheTimer(data.expires_at);
+                } else if (!isAutoRefresh) {
+                    console.log('Cache failed');
                 }
             } catch (err) {
-                console.log('Cache failed');
+                if (!isAutoRefresh) console.log('Cache failed');
             }
         }
 
@@ -556,6 +594,8 @@
             analyzeBtn.disabled = true;
             analyzeBtn.textContent = isProjectMode ? '⏳ Analyzing project...' : '⏳ Running 3 analyses...';
 
+            await ensureCacheReady();
+
             const levels = ['low', 'medium', 'high'];
 
             // Independent promises - each handles its own errors
@@ -567,7 +607,7 @@
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            file_content: fileContent,
+                            file_content: getAnalyzeFileContent(),
                             prompt: prompt,
                             level: level,
                             grounding: grounding,

@@ -10,11 +10,13 @@ import asyncio
 import base64
 import uuid
 import zipfile
-import io
+import tempfile
 import re
 import json
 import fnmatch
-from typing import Optional, List, Dict
+import traceback
+from dataclasses import dataclass
+from typing import Optional, List, Dict, BinaryIO
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, FileResponse
@@ -41,6 +43,8 @@ SKIP_DIRS = {'node_modules', '__pycache__', '.git', '.svn', 'venv', 'env', '.env
              'dist', 'build', 'target', '.idea', '.vscode', 'vendor', '.next', 'coverage',
              '.pytest_cache', '.mypy_cache', '.tox', 'htmlcov', 'site-packages', 'wheels',
              '.eggs', 'lib', 'lib64', 'parts', 'sdist', 'var', 'eggs', '*.egg-info'}
+EXACT_SKIP_DIRS = {entry for entry in SKIP_DIRS if '*' not in entry}
+WILDCARD_SKIP_DIRS = [entry for entry in SKIP_DIRS if '*' in entry]
 MAX_FILE_SIZE_PER_FILE = 100 * 1024  # 100KB
 MAX_FILES_TO_ANALYZE = 150
 MAX_CONTEXT_CHARS = 800000
@@ -50,12 +54,22 @@ MAX_DECOMPRESSED_SIZE = 200 * 1024 * 1024  # 200MB
 MAX_COMPRESSION_RATIO = 100  # Per-file ratio limit
 
 
-def parse_gitignore(gitignore_content: str) -> set:
+@dataclass(frozen=True)
+class GitignorePattern:
+    pattern: str
+    base_dir: str
+    anchored: bool
+    has_slash: bool
+    has_wildcards: bool
+
+
+def parse_gitignore(gitignore_content: str, base_dir: str) -> List[GitignorePattern]:
     """
-    Parse .gitignore content and return set of patterns to ignore.
+    Parse .gitignore content and return a list of patterns to ignore.
     Supports basic gitignore syntax (comments, negation, directories).
     """
-    patterns = set()
+    patterns: List[GitignorePattern] = []
+    normalized_base = base_dir.strip("/")
     for line in gitignore_content.split('\n'):
         line = line.strip()
         # Skip empty lines and comments
@@ -64,13 +78,54 @@ def parse_gitignore(gitignore_content: str) -> set:
         # Skip negation patterns (!) for simplicity
         if line.startswith('!'):
             continue
-        # Remove trailing slashes
-        line = line.rstrip('/')
-        patterns.add(line)
+        anchored = line.startswith('/')
+        # Remove leading/trailing slashes
+        line = line.lstrip('/').rstrip('/')
+        if not line:
+            continue
+        patterns.append(GitignorePattern(
+            pattern=line,
+            base_dir=normalized_base,
+            anchored=anchored,
+            has_slash='/' in line,
+            has_wildcards=any(token in line for token in ('*', '?', '['))
+        ))
     return patterns
 
 
-def should_skip_path(file_path: str, gitignore_patterns: set) -> bool:
+def matches_gitignore_pattern(file_path: str, pattern: GitignorePattern) -> bool:
+    normalized_path = file_path.strip('/')
+
+    if pattern.base_dir:
+        base_prefix = f"{pattern.base_dir}/"
+        if not normalized_path.startswith(base_prefix):
+            return False
+        relative_path = normalized_path[len(base_prefix):]
+    else:
+        relative_path = normalized_path
+
+    if not relative_path:
+        return False
+
+    if pattern.anchored:
+        if fnmatch.fnmatch(relative_path, pattern.pattern):
+            return True
+        if not pattern.has_wildcards:
+            return relative_path.startswith(f"{pattern.pattern}/")
+        return False
+
+    if pattern.has_slash:
+        if fnmatch.fnmatch(relative_path, pattern.pattern):
+            return True
+        if not pattern.has_wildcards:
+            return relative_path.startswith(f"{pattern.pattern}/")
+        return False
+
+    relative_parts = relative_path.split('/')
+    return any(fnmatch.fnmatch(part, pattern.pattern) for part in relative_parts)
+
+
+def should_skip_path(file_path: str, gitignore_patterns: List[GitignorePattern]) -> bool:
     """
     Check if a file path should be skipped based on gitignore patterns.
     Supports wildcards (*) and directory matching.
@@ -84,31 +139,18 @@ def should_skip_path(file_path: str, gitignore_patterns: set) -> bool:
     
     # Check against gitignore patterns
     for pattern in gitignore_patterns:
-        # Exact match
-        if pattern in path_parts:
-            return True
-        
-        # Wildcard match (simple implementation)
-        if '*' in pattern:
-            import fnmatch
-            for part in path_parts:
-                if fnmatch.fnmatch(part, pattern):
-                    return True
-            # Also check full path
-            if fnmatch.fnmatch(file_path, pattern):
-                return True
-        
-        # Check if pattern matches any directory in path
-        if pattern in file_path:
+        if matches_gitignore_pattern(file_path, pattern):
             return True
     
     return False
 
 app = FastAPI(title="LingTier", description="Adaptive Cognitive Tiers with Gemini 3")
 
+CORS_ALLOW_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOW_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -127,6 +169,13 @@ def get_client():
             raise HTTPException(status_code=500, detail="GEMINI_API_KEY not set")
         client = genai.Client(api_key=GEMINI_API_KEY)
     return client
+
+
+@app.on_event("startup")
+async def startup_event():
+    global client
+    if client is None and GEMINI_API_KEY:
+        client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # Language detection for multilingual support
@@ -233,7 +282,7 @@ class CacheResponse(BaseModel):
 
 
 # SECURITY: ZIP Processing with path traversal and per-file bomb protection
-def process_zip_file(zip_content: bytes) -> tuple:
+def process_zip_file(zip_stream: BinaryIO, compressed_size: int) -> tuple:
     """
     Extract and filter files from ZIP archive.
     SECURITY: Path traversal protection, per-file compression ratio check.
@@ -257,11 +306,11 @@ def process_zip_file(zip_content: bytes) -> tuple:
     
     files_content = []
     total_chars = 0
-    compressed_size = len(zip_content)
-    gitignore_patterns = set()
+    gitignore_patterns: List[GitignorePattern] = []
+    gitignore_files = 0
     
     try:
-        with zipfile.ZipFile(io.BytesIO(zip_content), 'r') as zf:
+        with zipfile.ZipFile(zip_stream, 'r') as zf:
             # SECURITY: Check total uncompressed size
             total_uncompressed = sum(info.file_size for info in zf.infolist() if not info.is_dir())
             
@@ -285,14 +334,19 @@ def process_zip_file(zip_content: bytes) -> tuple:
                 if file_info.filename.endswith('.gitignore') and not file_info.is_dir():
                     try:
                         gitignore_content = zf.read(file_info.filename).decode('utf-8')
-                        gitignore_patterns = parse_gitignore(gitignore_content)
-                        print(f"📋 Found .gitignore with {len(gitignore_patterns)} patterns")
-                        break
+                        base_dir = os.path.dirname(file_info.filename)
+                        gitignore_patterns.extend(parse_gitignore(gitignore_content, base_dir))
+                        gitignore_files += 1
                     except Exception as e:
                         print(f"⚠️ Failed to parse .gitignore: {e}")
+
+            if gitignore_patterns:
+                print(f"📋 Loaded {len(gitignore_patterns)} patterns from {gitignore_files} .gitignore files")
             
             # Sort by size (smaller first)
             file_list = sorted(zf.infolist(), key=lambda x: x.file_size)
+            
+            print(f"📦 Processing ZIP with {len(file_list)} entries...")
             
             for file_info in file_list:
                 stats["files_scanned"] += 1
@@ -315,11 +369,37 @@ def process_zip_file(zip_content: bytes) -> tuple:
                     stats["skipped_reasons"]["security_risk"] += 1
                     continue
                 
-                # SMART FILTERING: Skip hidden files/directories (.*) 
+                # Parse path parts for filtering
                 path_parts = file_path.split('/')
-                if any(part.startswith('.') and part not in {'.', '..'} for part in path_parts):
+                
+                # SMART FILTERING: Skip hidden files/directories (.*)
+                has_hidden = False
+                for part in path_parts:
+                    if part.startswith('.') and part not in {'.', '..'}:
+                        has_hidden = True
+                        break
+                
+                if has_hidden:
                     stats["files_skipped"] += 1
                     stats["skipped_reasons"]["hidden"] += 1
+                    continue
+                
+                # SMART FILTERING: Check for excluded directories (PRIORITY CHECK)
+                # This must come BEFORE gitignore to catch venv, node_modules, etc.
+                is_excluded_dir = False
+                for part in path_parts:
+                    if part in EXACT_SKIP_DIRS:
+                        is_excluded_dir = True
+                        break
+                    if WILDCARD_SKIP_DIRS and any(fnmatch.fnmatch(part, skip_pattern) for skip_pattern in WILDCARD_SKIP_DIRS):
+                        is_excluded_dir = True
+                        break
+                    if is_excluded_dir:
+                        break
+                
+                if is_excluded_dir:
+                    stats["files_skipped"] += 1
+                    stats["skipped_reasons"]["excluded_dir"] += 1
                     continue
                 
                 # SMART FILTERING: Check gitignore patterns
@@ -335,12 +415,6 @@ def process_zip_file(zip_content: bytes) -> tuple:
                         stats["files_skipped"] += 1
                         stats["skipped_reasons"]["security_risk"] += 1
                         continue
-                
-                # Check for excluded directories
-                if any(skip_dir in path_parts for skip_dir in SKIP_DIRS):
-                    stats["files_skipped"] += 1
-                    stats["skipped_reasons"]["excluded_dir"] += 1
-                    continue
                 
                 # Check extension
                 _, ext = os.path.splitext(file_path)
@@ -398,17 +472,52 @@ def process_zip_file(zip_content: bytes) -> tuple:
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="Invalid ZIP file")
     
-    project_context = f"""
+    # Log summary
+    print(f"✅ ZIP processing complete:")
+    print(f"   📊 Scanned: {stats['files_scanned']}, Analyzed: {stats['files_analyzed']}, Skipped: {stats['files_skipped']}")
+    print(f"   🚫 Skip reasons: {stats['skipped_reasons']}")
+    
+    estimated_tokens = total_chars // 4
+    project_context = build_project_context(files_content, stats, estimated_tokens)
+
+    stats["estimated_tokens"] = estimated_tokens
+
+    return project_context, stats, files_content
+
+
+def build_project_context(files_content: List[str], stats: Dict[str, int], estimated_tokens: int) -> str:
+    return f"""
 # PROJECT ANALYSIS
 # Files Analyzed: {stats['files_analyzed']} / {stats['files_scanned']} scanned
-# Estimated Tokens: {total_chars // 4}
+# Estimated Tokens: {estimated_tokens}
 
 {''.join(files_content)}
 """
-    
-    stats["estimated_tokens"] = total_chars // 4
-    
-    return project_context, stats
+
+
+async def update_project_token_estimate(project_context: str, stats: Dict[str, int], files_content: List[str]) -> str:
+    if not GEMINI_API_KEY:
+        return project_context
+
+    try:
+        cli = get_client()
+    except HTTPException:
+        return project_context
+
+    try:
+        response = await asyncio.to_thread(
+            cli.models.count_tokens,
+            model=MODEL_NAME,
+            contents=project_context
+        )
+        token_count = getattr(response, "total_tokens", None) or getattr(response, "token_count", None)
+        if isinstance(token_count, int) and token_count > 0:
+            stats["estimated_tokens"] = token_count
+            return build_project_context(files_content, stats, token_count)
+    except Exception as e:
+        print(f"Token count failed: {e}")
+
+    return project_context
 
 
 # Endpoints
@@ -422,60 +531,66 @@ async def serve_frontend():
 async def upload_file(file: UploadFile = File(...)):
     # STREAMING: Read file in chunks instead of all at once
     chunk_size = 8192  # 8KB chunks
-    content_chunks = []
     total_size = 0
+    temp_file = tempfile.SpooledTemporaryFile(max_size=MAX_FILE_SIZE, mode="w+b")
     
     print(f"📥 Starting upload: {file.filename}")
     
-    while True:
-        chunk = await file.read(chunk_size)
-        if not chunk:
-            break
-        content_chunks.append(chunk)
-        total_size += len(chunk)
-        
-        # Log progress every 1MB for Railway monitoring
-        if total_size % (1024 * 1024) < chunk_size:
-            print(f"📥 Uploaded {total_size / (1024 * 1024):.1f}MB...")
-        
-        # Check size limit during streaming
-        if total_size > MAX_FILE_SIZE:
-            raise HTTPException(status_code=413, detail=f"File too large. Max: {MAX_FILE_SIZE // (1024*1024)}MB")
-    
-    # Combine chunks
-    content = b''.join(content_chunks)
-    print(f"✅ Upload complete: {total_size / (1024 * 1024):.1f}MB")
-    
-    is_zip = file.filename.endswith('.zip') or content[:4] == b'PK\x03\x04'
-    
-    if is_zip:
-        project_context, stats = process_zip_file(content)
-        return {
-            "filename": file.filename,
-            "size": len(content),
-            "content": project_context,
-            "is_project": True,
-            "project_stats": stats
-        }
-    else:
-        text_content = None
-        for encoding in ['utf-8', 'latin-1', 'cp1252']:
-            try:
-                text_content = content.decode(encoding)
+    try:
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
                 break
-            except (UnicodeDecodeError, LookupError):
-                continue
-        
-        if text_content is None:
-            text_content = f"[Binary file: {file.filename}, {len(content)} bytes]"
-        
-        return {
-            "filename": file.filename,
-            "size": len(content),
-            "content": text_content,
-            "is_project": False,
-            "project_stats": None
-        }
+            temp_file.write(chunk)
+            total_size += len(chunk)
+
+            # Log progress every 1MB for Railway monitoring
+            if total_size % (1024 * 1024) < chunk_size:
+                print(f"📥 Uploaded {total_size / (1024 * 1024):.1f}MB...")
+
+            # Check size limit during streaming
+            if total_size > MAX_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"File too large. Max: {MAX_FILE_SIZE // (1024*1024)}MB")
+
+        print(f"✅ Upload complete: {total_size / (1024 * 1024):.1f}MB")
+
+        temp_file.seek(0)
+        signature = temp_file.read(4)
+        is_zip = file.filename.endswith('.zip') or signature == b'PK\x03\x04'
+        temp_file.seek(0)
+
+        if is_zip:
+            project_context, stats, files_content = process_zip_file(temp_file, total_size)
+            project_context = await update_project_token_estimate(project_context, stats, files_content)
+            return {
+                "filename": file.filename,
+                "size": total_size,
+                "content": project_context,
+                "is_project": True,
+                "project_stats": stats
+            }
+        else:
+            content = temp_file.read()
+            text_content = None
+            for encoding in ['utf-8', 'latin-1', 'cp1252']:
+                try:
+                    text_content = content.decode(encoding)
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+
+            if text_content is None:
+                text_content = f"[Binary file: {file.filename}, {len(content)} bytes]"
+
+            return {
+                "filename": file.filename,
+                "size": len(content),
+                "content": text_content,
+                "is_project": False,
+                "project_stats": None
+            }
+    finally:
+        temp_file.close()
 
 
 async def generate_architecture_image(cli, analysis_summary: str, user_prompt: str) -> Optional[str]:
@@ -529,8 +644,6 @@ async def analyze(request: AnalyzeRequest):
     
     user_lang = detect_language(request.prompt)
     
-    full_prompt = f"{request.prompt}\n\n---\nFILE CONTENT:\n{request.file_content}"
-    
     try:
         thinking_config = types.ThinkingConfig(thinking_level=request.level)
         
@@ -554,11 +667,20 @@ async def analyze(request: AnalyzeRequest):
         cache_hit = False
         tokens_saved = 0
         cache_expires_in = 0
+        file_content = request.file_content or ""
         if request.cache_id and request.cache_id in context_cache:
             cache_hit = True
             cached_data = context_cache[request.cache_id]
+            file_content = cached_data.get('content', file_content)
             tokens_saved = cached_data.get('tokens', 0)
             cache_expires_in = int(3600 - (time.time() - cached_data.get('created', time.time())))
+        elif request.cache_id and not file_content:
+            raise HTTPException(status_code=400, detail="Cache miss. Please re-upload or refresh the cache.")
+
+        if not file_content:
+            raise HTTPException(status_code=400, detail="File content is empty.")
+
+        full_prompt = f"{request.prompt}\n\n---\nFILE CONTENT:\n{file_content}"
         
         # ASYNC Gemini call
         response = await asyncio.to_thread(
@@ -595,9 +717,6 @@ async def analyze(request: AnalyzeRequest):
             if hasattr(part, 'code_execution_result') and part.code_execution_result:
                 code_result = part.code_execution_result.output
         
-        # Clean any markdown artifacts
-        analysis_text = clean_analysis_output(analysis_text)
-        
         tokens_input = response.usage_metadata.prompt_token_count if response.usage_metadata else 0
         tokens_output = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
         
@@ -629,6 +748,7 @@ async def analyze(request: AnalyzeRequest):
         )
         
     except Exception as e:
+        print(f"Analyze failed: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -676,15 +796,13 @@ async def iterate(request: IterateRequest):
                 sig = part.thought_signature
                 new_signature = base64.b64encode(sig).decode('utf-8') if isinstance(sig, bytes) else sig
         
-        # Clean output
-        refined_text = clean_analysis_output(refined_text)
-        
         return IterateResponse(
             refined_analysis=refined_text,
             new_signature=new_signature
         )
         
     except Exception as e:
+        print(f"Iteration failed: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
