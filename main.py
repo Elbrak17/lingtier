@@ -13,6 +13,7 @@ import zipfile
 import io
 import re
 import json
+import fnmatch
 from typing import Optional, List, Dict
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
@@ -36,8 +37,10 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 ALLOWED_EXTENSIONS = {'.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.cpp', '.c', '.h', '.hpp', 
                       '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.cs', '.vue',
                       '.html', '.css', '.scss', '.json', '.yaml', '.yml', '.toml', '.md', '.txt'}
-SKIP_DIRS = {'node_modules', '__pycache__', '.git', '.svn', 'venv', 'env', '.env',
-             'dist', 'build', 'target', '.idea', '.vscode', 'vendor', '.next'}
+SKIP_DIRS = {'node_modules', '__pycache__', '.git', '.svn', 'venv', 'env', '.env', '.venv',
+             'dist', 'build', 'target', '.idea', '.vscode', 'vendor', '.next', 'coverage',
+             '.pytest_cache', '.mypy_cache', '.tox', 'htmlcov', 'site-packages', 'wheels',
+             '.eggs', 'lib', 'lib64', 'parts', 'sdist', 'var', 'eggs', '*.egg-info'}
 MAX_FILE_SIZE_PER_FILE = 100 * 1024  # 100KB
 MAX_FILES_TO_ANALYZE = 150
 MAX_CONTEXT_CHARS = 800000
@@ -45,6 +48,61 @@ MAX_CONTEXT_CHARS = 800000
 # SECURITY: ZIP bomb protection
 MAX_DECOMPRESSED_SIZE = 200 * 1024 * 1024  # 200MB
 MAX_COMPRESSION_RATIO = 100  # Per-file ratio limit
+
+
+def parse_gitignore(gitignore_content: str) -> set:
+    """
+    Parse .gitignore content and return set of patterns to ignore.
+    Supports basic gitignore syntax (comments, negation, directories).
+    """
+    patterns = set()
+    for line in gitignore_content.split('\n'):
+        line = line.strip()
+        # Skip empty lines and comments
+        if not line or line.startswith('#'):
+            continue
+        # Skip negation patterns (!) for simplicity
+        if line.startswith('!'):
+            continue
+        # Remove trailing slashes
+        line = line.rstrip('/')
+        patterns.add(line)
+    return patterns
+
+
+def should_skip_path(file_path: str, gitignore_patterns: set) -> bool:
+    """
+    Check if a file path should be skipped based on gitignore patterns.
+    Supports wildcards (*) and directory matching.
+    """
+    path_parts = file_path.split('/')
+    
+    # Check if any part is a hidden file/directory (starts with .)
+    for part in path_parts:
+        if part.startswith('.') and part not in {'.', '..'}:
+            return True
+    
+    # Check against gitignore patterns
+    for pattern in gitignore_patterns:
+        # Exact match
+        if pattern in path_parts:
+            return True
+        
+        # Wildcard match (simple implementation)
+        if '*' in pattern:
+            import fnmatch
+            for part in path_parts:
+                if fnmatch.fnmatch(part, pattern):
+                    return True
+            # Also check full path
+            if fnmatch.fnmatch(file_path, pattern):
+                return True
+        
+        # Check if pattern matches any directory in path
+        if pattern in file_path:
+            return True
+    
+    return False
 
 app = FastAPI(title="LingTier", description="Adaptive Cognitive Tiers with Gemini 3")
 
@@ -179,6 +237,7 @@ def process_zip_file(zip_content: bytes) -> tuple:
     """
     Extract and filter files from ZIP archive.
     SECURITY: Path traversal protection, per-file compression ratio check.
+    SMART FILTERING: Respects .gitignore, skips hidden files/dirs.
     """
     stats = {
         "files_scanned": 0,
@@ -190,13 +249,16 @@ def process_zip_file(zip_content: bytes) -> tuple:
             "excluded_dir": 0,
             "excluded_ext": 0,
             "encoding_error": 0,
-            "security_risk": 0  # NEW: Path traversal attempts
+            "security_risk": 0,
+            "gitignore": 0,
+            "hidden": 0
         }
     }
     
     files_content = []
     total_chars = 0
     compressed_size = len(zip_content)
+    gitignore_patterns = set()
     
     try:
         with zipfile.ZipFile(io.BytesIO(zip_content), 'r') as zf:
@@ -217,6 +279,17 @@ def process_zip_file(zip_content: bytes) -> tuple:
                         status_code=400, 
                         detail=f"Suspicious compression ratio ({ratio:.0f}:1, max: {MAX_COMPRESSION_RATIO}:1)"
                     )
+            
+            # SMART FILTERING: Parse .gitignore if present
+            for file_info in zf.infolist():
+                if file_info.filename.endswith('.gitignore') and not file_info.is_dir():
+                    try:
+                        gitignore_content = zf.read(file_info.filename).decode('utf-8')
+                        gitignore_patterns = parse_gitignore(gitignore_content)
+                        print(f"📋 Found .gitignore with {len(gitignore_patterns)} patterns")
+                        break
+                    except Exception as e:
+                        print(f"⚠️ Failed to parse .gitignore: {e}")
             
             # Sort by size (smaller first)
             file_list = sorted(zf.infolist(), key=lambda x: x.file_size)
@@ -242,6 +315,19 @@ def process_zip_file(zip_content: bytes) -> tuple:
                     stats["skipped_reasons"]["security_risk"] += 1
                     continue
                 
+                # SMART FILTERING: Skip hidden files/directories (.*) 
+                path_parts = file_path.split('/')
+                if any(part.startswith('.') and part not in {'.', '..'} for part in path_parts):
+                    stats["files_skipped"] += 1
+                    stats["skipped_reasons"]["hidden"] += 1
+                    continue
+                
+                # SMART FILTERING: Check gitignore patterns
+                if gitignore_patterns and should_skip_path(file_path, gitignore_patterns):
+                    stats["files_skipped"] += 1
+                    stats["skipped_reasons"]["gitignore"] += 1
+                    continue
+                
                 # SECURITY: Per-file compression ratio check
                 if file_info.compress_size > 0:
                     file_ratio = file_info.file_size / file_info.compress_size
@@ -251,7 +337,6 @@ def process_zip_file(zip_content: bytes) -> tuple:
                         continue
                 
                 # Check for excluded directories
-                path_parts = file_path.split('/')
                 if any(skip_dir in path_parts for skip_dir in SKIP_DIRS):
                     stats["files_skipped"] += 1
                     stats["skipped_reasons"]["excluded_dir"] += 1

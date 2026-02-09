@@ -137,6 +137,8 @@
                     <div>📊 Too large: <span id="skipSize" class="text-yellow-400">0</span></div>
                     <div>🔒 Binary: <span id="skipBinary" class="text-yellow-400">0</span></div>
                     <div>🛡️ Security: <span id="skipSecurity" class="text-red-400">0</span></div>
+                    <div>👁️ Hidden: <span id="skipHidden" class="text-gray-400">0</span></div>
+                    <div>📋 .gitignore: <span id="skipGitignore" class="text-blue-400">0</span></div>
                 </div>
             </div>
         </section>
@@ -402,6 +404,8 @@
                 document.getElementById('skipSize').textContent = stats.skipped_reasons.too_large || 0;
                 document.getElementById('skipBinary').textContent = (stats.skipped_reasons.binary || 0) + (stats.skipped_reasons.encoding_error || 0);
                 document.getElementById('skipSecurity').textContent = stats.skipped_reasons.security_risk || 0;
+                document.getElementById('skipHidden').textContent = stats.skipped_reasons.hidden || 0;
+                document.getElementById('skipGitignore').textContent = stats.skipped_reasons.gitignore || 0;
             }
         }
 
