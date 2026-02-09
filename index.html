@@ -261,6 +261,10 @@
         let cacheTimerInterval = null;
         let cacheRefreshInFlight = false;
         const CACHE_REFRESH_THRESHOLD_MS = 2 * 60 * 1000;
+        const DOMPURIFY_CONFIG = {
+            ALLOWED_TAGS: ['h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'code', 'br', 'strong', 'em', 'span', 'div', 'a'],
+            ALLOWED_ATTR: ['class', 'href', 'target', 'rel']
+        };
 
         // DOM Elements
         const dropzone = document.getElementById('dropzone');
@@ -308,10 +312,15 @@
                 .replace(/<br>[-•] /g, '<br>• ')
                 .replace(/<br>(\d+)\. /g, '<br>$1. ');
 
-            return DOMPurify.sanitize(result, {
-                ALLOWED_TAGS: ['h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'code', 'br', 'strong', 'em', 'span', 'div', 'a'],
-                ALLOWED_ATTR: ['class', 'href', 'target', 'rel']
-            });
+            return sanitizeMarkup(result);
+        }
+
+        function sanitizeMarkup(markup) {
+            if (window.DOMPurify && typeof DOMPurify.sanitize === 'function') {
+                return DOMPurify.sanitize(markup, DOMPURIFY_CONFIG);
+            }
+            console.warn('DOMPurify unavailable, falling back to raw markup');
+            return markup;
         }
 
         // Display error in specific column with retry
