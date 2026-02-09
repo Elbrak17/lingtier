@@ -1,6 +1,11 @@
+# Core Framework
 fastapi
-uvicorn
+uvicorn[standard]
 python-multipart
-google-generativeai
 python-dotenv
+pydantic
+
+google-genai>=1.0.0
+
+# Caching
 cachetools
