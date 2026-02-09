@@ -335,9 +335,31 @@ async def serve_frontend():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"File too large. Max: {MAX_FILE_SIZE // (1024*1024)}MB")
+    # STREAMING: Read file in chunks instead of all at once
+    chunk_size = 8192  # 8KB chunks
+    content_chunks = []
+    total_size = 0
+    
+    print(f"📥 Starting upload: {file.filename}")
+    
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        content_chunks.append(chunk)
+        total_size += len(chunk)
+        
+        # Log progress every 1MB for Railway monitoring
+        if total_size % (1024 * 1024) < chunk_size:
+            print(f"📥 Uploaded {total_size / (1024 * 1024):.1f}MB...")
+        
+        # Check size limit during streaming
+        if total_size > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail=f"File too large. Max: {MAX_FILE_SIZE // (1024*1024)}MB")
+    
+    # Combine chunks
+    content = b''.join(content_chunks)
+    print(f"✅ Upload complete: {total_size / (1024 * 1024):.1f}MB")
     
     is_zip = file.filename.endswith('.zip') or content[:4] == b'PK\x03\x04'
     
