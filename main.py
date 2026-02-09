@@ -34,6 +34,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_NAME = "gemini-3-flash-preview"  # Gemini 3 Flash for thinking_level
 IMAGE_MODEL_NAME = "gemini-3-pro-image-preview"  # For architecture diagrams
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MODEL_CONTEXT_PROMPT = (
+    "You are running inside the LingTier app using the Gemini 3 Flash Preview model "
+    "(model name: gemini-3-flash-preview). "
+    "In the official Gemini API documentation, Gemini 3 preview model names include "
+    "gemini-3-flash-preview, gemini-3-pro-preview, and gemini-3-pro-image-preview. "
+    "Treat 'Gemini 3' as the model family name used by this app. "
+    "Do not speculate about public availability, naming disputes, or whether the model exists. "
+    "If asked about the model, state that you are a Gemini 3 preview model accessed via the API. "
+    "Focus on the user's request and the provided code context."
+)
 
 # ZIP Processing Configuration
 ALLOWED_EXTENSIONS = {'.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.cpp', '.c', '.h', '.hpp', 
@@ -680,7 +690,7 @@ async def analyze(request: AnalyzeRequest):
         if not file_content:
             raise HTTPException(status_code=400, detail="File content is empty.")
 
-        full_prompt = f"{request.prompt}\n\n---\nFILE CONTENT:\n{file_content}"
+        full_prompt = f"{MODEL_CONTEXT_PROMPT}\n\n{request.prompt}\n\n---\nFILE CONTENT:\n{file_content}"
         
         # ASYNC Gemini call
         response = await asyncio.to_thread(
@@ -758,6 +768,10 @@ async def iterate(request: IterateRequest):
     
     try:
         contents = [
+            types.Content(
+                role="user",
+                parts=[types.Part(text=MODEL_CONTEXT_PROMPT)]
+            ),
             types.Content(
                 role="user",
                 parts=[types.Part(text=request.original_context)]
