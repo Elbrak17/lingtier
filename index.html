@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LingTier - Adaptive Cognitive Tiers</title>
+    <meta name="description" content="Compare Gemini 3's thinking levels: Low, Medium, High with parallel analysis">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .dropzone-active {
+            border-color: #22C55E !important;
+            background-color: rgba(34, 197, 94, 0.1) !important;
+        }
+
+        code {
+            font-family: 'Fira Code', 'Consolas', monospace;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-900 text-white min-h-screen">
+    <!-- Header -->
+    <header class="bg-gray-800 border-b border-gray-700 py-4">
+        <div class="container mx-auto px-6 flex items-center justify-between">
+            <div>
+                <h1
+                    class="text-3xl font-bold bg-gradient-to-r from-red-500 via-yellow-500 to-green-500 bg-clip-text text-transparent">
+                    LingTier
+                </h1>
+                <p class="text-gray-400 text-sm">Adaptive Cognitive Tiers</p>
+            </div>
+            <div class="text-sm text-gray-500">
+                Powered by Gemini 3 • thinking_level + thought_signatures
+            </div>
+        </div>
+    </header>
+
+    <main class="container mx-auto px-6 py-8">
+        <!-- Upload Section -->
+        <section class="mb-8">
+            <div id="dropzone"
+                class="border-2 border-dashed border-gray-600 rounded-xl p-8 text-center cursor-pointer hover:border-gray-500 transition-colors">
+                <input type="file" id="fileInput" class="hidden"
+                    accept=".py,.txt,.js,.ts,.java,.cpp,.c,.go,.rs,.zip,.pdf">
+                <div class="text-gray-400">
+                    <svg class="w-12 h-12 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor"
+                        viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12">
+                        </path>
+                    </svg>
+                    <p class="text-lg mb-2">Drag & drop your file here</p>
+                    <p class="text-sm">or click to browse (max 50MB) • <span class="text-purple-400">ZIP projects
+                            supported</span></p>
+                </div>
+                <div id="fileInfo" class="hidden mt-4 text-green-400"></div>
+                <!-- Cache Status -->
+                <div id="cacheStatus" class="hidden mt-2 text-sm">
+                    <span class="text-yellow-400">⚡ Context Cached</span>
+                    <span id="cacheTimer" class="text-xs text-gray-500 ml-2"></span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Prompt Section -->
+        <section class="mb-8">
+            <label class="block text-gray-300 mb-2 font-medium">Analysis Prompt</label>
+            <textarea id="prompt" rows="3"
+                class="w-full bg-gray-800 border border-gray-600 rounded-lg p-4 text-white focus:border-blue-500 focus:outline-none"
+                placeholder="Analyze this code for bugs">Analyze this code for bugs and suggest improvements</textarea>
+
+            <!-- Feature toggles -->
+            <div class="flex flex-wrap gap-6 mt-4">
+                <label class="flex items-center gap-2 text-gray-400 text-sm cursor-pointer hover:text-gray-300">
+                    <input type="checkbox" id="groundingCheck" class="w-4 h-4 accent-blue-500">
+                    🔍 Verify facts with Google Search
+                </label>
+                <label class="flex items-center gap-2 text-gray-400 text-sm cursor-pointer hover:text-gray-300">
+                    <input type="checkbox" id="imageGenCheck" class="w-4 h-4 accent-purple-500">
+                    🎨 Generate architecture diagram (High only)
+                </label>
+                <label class="flex items-center gap-2 text-gray-400 text-sm cursor-pointer hover:text-gray-300">
+                    <input type="checkbox" id="cacheCheck" class="w-4 h-4 accent-yellow-500">
+                    ⚡ Cache context for iterations (saves 60% cost)
+                </label>
+            </div>
+
+            <button id="analyzeBtn"
+                class="mt-4 w-full py-4 bg-gradient-to-r from-red-500 via-yellow-500 to-green-500 rounded-lg font-bold text-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed">
+                🚀 Run Tri-Analysis
+            </button>
+        </section>
+
+        <!-- Project Stats Banner -->
+        <section id="projectStatsBanner" class="hidden mb-6 bg-gray-800 rounded-xl p-4 border border-purple-500/30">
+            <div class="flex justify-between items-center mb-3">
+                <h3 class="text-purple-400 font-bold flex items-center gap-2">
+                    <span>📦</span> Project Analysis Mode
+                </h3>
+                <button onclick="toggleSkipDetails()"
+                    class="text-xs text-gray-400 hover:text-white px-2 py-1 bg-gray-700 rounded">
+                    View Skip Details
+                </button>
+            </div>
+            <div class="grid grid-cols-4 gap-4 text-center">
+                <div>
+                    <div class="text-2xl font-bold text-white" id="statScanned">-</div>
+                    <div class="text-xs text-gray-500">Files Scanned</div>
+                </div>
+                <div>
+                    <div class="text-2xl font-bold text-green-400" id="statAnalyzed">-</div>
+                    <div class="text-xs text-gray-500">Analyzed</div>
+                </div>
+                <div>
+                    <div class="text-2xl font-bold text-yellow-400" id="statSkipped">-</div>
+                    <div class="text-xs text-gray-500">Skipped</div>
+                </div>
+                <div>
+                    <div class="text-2xl font-bold text-blue-400" id="statTokens">-</div>
+                    <div class="text-xs text-gray-500">Est. Tokens</div>
+                </div>
+            </div>
+            <div id="skipDetails" class="hidden mt-4 text-xs text-gray-400 bg-gray-900 p-3 rounded-lg">
+                <div class="grid grid-cols-3 gap-2">
+                    <div>📁 Excluded dirs: <span id="skipDirs" class="text-yellow-400">0</span></div>
+                    <div>📄 Wrong ext: <span id="skipExt" class="text-yellow-400">0</span></div>
+                    <div>📊 Too large: <span id="skipSize" class="text-yellow-400">0</span></div>
+                    <div>🔒 Binary: <span id="skipBinary" class="text-yellow-400">0</span></div>
+                    <div>🛡️ Security: <span id="skipSecurity" class="text-red-400">0</span></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Results Section - 3 Columns -->
+        <section class="grid grid-cols-3 gap-6 mb-8">
+            <!-- LOW Column -->
+            <div class="bg-gray-800 rounded-xl border-2 border-red-500/30 overflow-hidden">
+                <div class="bg-red-500/20 px-4 py-3 border-b border-red-500/30">
+                    <div class="flex items-center justify-between">
+                        <h2 class="font-bold text-red-400 text-lg">⚡ LOW</h2>
+                        <span id="lowTime" class="text-sm text-gray-400">--</span>
+                    </div>
+                    <p class="text-xs text-gray-500">Fast but approximate</p>
+                </div>
+                <div class="p-4 h-[500px] overflow-y-auto">
+                    <div id="lowBadges" class="flex flex-wrap gap-2 mb-3"></div>
+                    <div id="lowTokens" class="text-xs text-gray-500 mb-2"></div>
+                    <div id="lowResult" class="text-gray-300 text-sm">
+                        <span class="text-gray-500 italic">Results will appear here...</span>
+                    </div>
+                    <div id="lowGrounding" class="hidden mt-3 text-xs border-t border-gray-700 pt-2">
+                        <div class="text-blue-400 font-semibold mb-1">🔍 Sources:</div>
+                        <ul class="list-disc pl-4 text-gray-500 space-y-1"></ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- MEDIUM Column -->
+            <div class="bg-gray-800 rounded-xl border-2 border-yellow-500/30 overflow-hidden">
+                <div class="bg-yellow-500/20 px-4 py-3 border-b border-yellow-500/30">
+                    <div class="flex items-center justify-between">
+                        <h2 class="font-bold text-yellow-400 text-lg">⚖️ MEDIUM</h2>
+                        <span id="mediumTime" class="text-sm text-gray-400">--</span>
+                    </div>
+                    <p class="text-xs text-gray-500">Balanced analysis</p>
+                </div>
+                <div class="p-4 h-[500px] overflow-y-auto">
+                    <div id="mediumBadges" class="flex flex-wrap gap-2 mb-3"></div>
+                    <div id="mediumTokens" class="text-xs text-gray-500 mb-2"></div>
+                    <div id="mediumResult" class="text-gray-300 text-sm">
+                        <span class="text-gray-500 italic">Results will appear here...</span>
+                    </div>
+                    <div id="mediumGrounding" class="hidden mt-3 text-xs border-t border-gray-700 pt-2">
+                        <div class="text-blue-400 font-semibold mb-1">🔍 Sources:</div>
+                        <ul class="list-disc pl-4 text-gray-500 space-y-1"></ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- HIGH Column -->
+            <div class="bg-gray-800 rounded-xl border-2 border-green-500/30 overflow-hidden">
+                <div class="bg-green-500/20 px-4 py-3 border-b border-green-500/30">
+                    <div class="flex items-center justify-between">
+                        <h2 class="font-bold text-green-400 text-lg">🧠 HIGH</h2>
+                        <span id="highTime" class="text-sm text-gray-400">--</span>
+                    </div>
+                    <p class="text-xs text-gray-500">Deep + code execution</p>
+                </div>
+                <div class="p-4 h-[500px] overflow-y-auto">
+                    <div id="highBadges" class="flex flex-wrap gap-2 mb-3"></div>
+                    <div id="highTokens" class="text-xs text-gray-500 mb-2"></div>
+                    <div id="highResult" class="text-gray-300 text-sm">
+                        <span class="text-gray-500 italic">Results will appear here...</span>
+                    </div>
+                    <div id="highGrounding" class="hidden mt-3 text-xs border-t border-gray-700 pt-2">
+                        <div class="text-blue-400 font-semibold mb-1">🔍 Sources:</div>
+                        <ul class="list-disc pl-4 text-gray-500 space-y-1"></ul>
+                    </div>
+                    <!-- Thought Process (HIGH only) -->
+                    <details id="highThought" class="hidden mt-3 text-xs bg-gray-900/50 rounded border border-gray-700">
+                        <summary class="cursor-pointer p-2 hover:text-gray-300 text-gray-500">🧠 View Thinking Process
+                        </summary>
+                        <div id="highThoughtContent"
+                            class="p-2 font-mono text-gray-400 whitespace-pre-wrap border-t border-gray-700"></div>
+                    </details>
+                </div>
+            </div>
+        </section>
+
+        <!-- Generated Image Section -->
+        <section id="imageSection" class="hidden mb-8 bg-gray-800 rounded-xl p-6 border border-purple-500/30">
+            <h3 class="text-xl font-bold text-purple-400 mb-4">🎨 Generated Architecture (4K)</h3>
+            <img id="generatedImage" class="rounded-lg max-w-full border border-gray-700"
+                alt="Generated Architecture Diagram" />
+        </section>
+
+        <!-- Iteration Section -->
+        <section id="iterateSection" class="hidden bg-gray-800 rounded-xl p-6 border border-gray-700">
+            <h3 class="text-xl font-bold text-green-400 mb-4">🔄 Iterate with Thought Signature</h3>
+            <p class="text-gray-400 text-sm mb-4">
+                The HIGH analysis returned a thought_signature. Use it to refine the analysis.
+            </p>
+            <div class="flex gap-4">
+                <input id="feedback" type="text"
+                    class="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 text-white focus:border-green-500 focus:outline-none"
+                    placeholder="Consider async edge cases, memory leaks, etc.">
+                <button id="iterateBtn"
+                    class="px-8 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-bold transition-colors disabled:opacity-50">
+                    Iterate
+                </button>
+            </div>
+            <div id="iterateResult" class="mt-6 hidden">
+                <h4 class="text-green-400 font-medium mb-2">Refined Analysis:</h4>
+                <div id="refinedText" class="bg-gray-900 rounded-lg p-4 text-gray-300 text-sm"></div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        // State
+        let fileContent = '';
+        let currentSignature = null;
+        let originalContext = '';
+        let currentCacheId = null;
+        let isProjectMode = false;
+        let currentProjectStats = null;
+        let cacheExpiresAt = null;
+        let cacheTimerInterval = null;
+
+        // DOM Elements
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const promptEl = document.getElementById('prompt');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const iterateSection = document.getElementById('iterateSection');
+        const iterateBtn = document.getElementById('iterateBtn');
+        const feedbackEl = document.getElementById('feedback');
+        const groundingCheck = document.getElementById('groundingCheck');
+        const imageGenCheck = document.getElementById('imageGenCheck');
+        const cacheCheck = document.getElementById('cacheCheck');
+
+        // HTML formatting (clean output, no markdown artifacts)
+        function formatAnalysis(text) {
+            if (!text) return '';
+
+            // Step 1: HTML escape
+            let result = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+
+            // Step 2: Headers (process while \n exists)
+            result = result
+                .replace(/^##### (.+)$/gm, '<h6 class="text-gray-400 font-semibold mt-2 mb-1 text-sm">$1</h6>')
+                .replace(/^#### (.+)$/gm, '<h5 class="text-pink-400 font-bold mt-2 mb-1">$1</h5>')
+                .replace(/^### (.+)$/gm, '<h4 class="text-yellow-400 font-bold mt-3 mb-1">$1</h4>')
+                .replace(/^## (.+)$/gm, '<h3 class="text-green-400 font-bold mt-4 mb-2">$1</h3>')
+                .replace(/^# (.+)$/gm, '<h2 class="text-blue-400 font-bold mt-4 mb-2">$1</h2>');
+
+            // Step 3: Code blocks
+            result = result
+                .replace(/```(\w+)?\n?([\s\S]*?)```/g, '<pre class="bg-gray-950 p-2 rounded mt-2 mb-2 overflow-x-auto text-xs"><code>$2</code></pre>');
+
+            // Step 4: Newlines to <br>
+            result = result.replace(/\n/g, '<br>');
+
+            // Step 5: Inline formatting
+            result = result
+                .replace(/`([^`]+)`/g, '<code class="bg-gray-800 px-1 rounded text-pink-400">$1</code>')
+                .replace(/\*\*([^*]+)\*\*/g, '<strong class="text-white">$1</strong>')
+                .replace(/\*([^*]+)\*/g, '<em class="text-gray-300">$1</em>')
+                .replace(/<br>[-•] /g, '<br>• ')
+                .replace(/<br>(\d+)\. /g, '<br>$1. ');
+
+            return result;
+        }
+
+        // Display error in specific column with retry
+        function displayError(level, message) {
+            const resultEl = document.getElementById(`${level}Result`);
+            const timeEl = document.getElementById(`${level}Time`);
+
+            resultEl.innerHTML = `
+                <div class="text-red-400 bg-red-900/20 p-3 rounded border border-red-500/30">
+                    <div class="font-bold mb-1">❌ Analysis Failed</div>
+                    <div class="text-sm text-gray-400">${message}</div>
+                    <button onclick="retryLevel('${level}')" class="mt-2 text-xs bg-red-600 hover:bg-red-700 px-3 py-1 rounded">
+                        🔄 Retry ${level.toUpperCase()}
+                    </button>
+                </div>
+            `;
+            timeEl.textContent = 'Failed';
+        }
+
+        // Retry single level
+        async function retryLevel(level) {
+            const prompt = promptEl.value;
+            const grounding = groundingCheck.checked;
+            const generateImage = imageGenCheck.checked;
+
+            document.getElementById(`${level}Result`).innerHTML = '<span class="animate-pulse text-gray-500">Retrying...</span>';
+
+            try {
+                const res = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        file_content: fileContent,
+                        prompt: prompt,
+                        level: level,
+                        grounding: grounding,
+                        generate_image: generateImage,
+                        cache_id: currentCacheId,
+                        project_mode: isProjectMode
+                    })
+                });
+
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail);
+                }
+
+                const data = await res.json();
+                updateColumn(level, data, data.execution_time_ms);
+            } catch (err) {
+                displayError(level, err.message);
+            }
+        }
+
+        // Cache timer
+        function startCacheTimer(expiresAt) {
+            cacheExpiresAt = expiresAt;
+            const cacheStatus = document.getElementById('cacheStatus');
+            const cacheTimer = document.getElementById('cacheTimer');
+            cacheStatus.classList.remove('hidden');
+
+            if (cacheTimerInterval) clearInterval(cacheTimerInterval);
+
+            cacheTimerInterval = setInterval(() => {
+                const remaining = Math.max(0, cacheExpiresAt - Date.now());
+                const minutes = Math.floor(remaining / 60000);
+                const seconds = Math.floor((remaining % 60000) / 1000);
+
+                if (remaining > 0) {
+                    cacheTimer.textContent = `expires in ${minutes}m ${seconds}s`;
+                    cacheTimer.classList.remove('text-red-400');
+                } else {
+                    cacheTimer.textContent = 'expired';
+                    cacheTimer.classList.add('text-red-400');
+                    clearInterval(cacheTimerInterval);
+                }
+            }, 1000);
+        }
+
+        function toggleSkipDetails() {
+            document.getElementById('skipDetails').classList.toggle('hidden');
+        }
+
+        function showProjectStats(stats) {
+            const banner = document.getElementById('projectStatsBanner');
+            banner.classList.remove('hidden');
+
+            document.getElementById('statScanned').textContent = stats.files_scanned.toLocaleString();
+            document.getElementById('statAnalyzed').textContent = stats.files_analyzed.toLocaleString();
+            document.getElementById('statSkipped').textContent = stats.files_skipped.toLocaleString();
+            document.getElementById('statTokens').textContent = (stats.estimated_tokens / 1000).toFixed(0) + 'K';
+
+            if (stats.skipped_reasons) {
+                document.getElementById('skipDirs').textContent = stats.skipped_reasons.excluded_dir || 0;
+                document.getElementById('skipExt').textContent = stats.skipped_reasons.excluded_ext || 0;
+                document.getElementById('skipSize').textContent = stats.skipped_reasons.too_large || 0;
+                document.getElementById('skipBinary').textContent = (stats.skipped_reasons.binary || 0) + (stats.skipped_reasons.encoding_error || 0);
+                document.getElementById('skipSecurity').textContent = stats.skipped_reasons.security_risk || 0;
+            }
+        }
+
+        function hideProjectStats() {
+            document.getElementById('projectStatsBanner').classList.add('hidden');
+        }
+
+        // File Upload
+        dropzone.addEventListener('click', () => fileInput.click());
+        dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dropzone-active'); });
+        dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dropzone-active'));
+        dropzone.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('dropzone-active');
+            if (e.dataTransfer.files[0]) await uploadFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', async (e) => {
+            if (e.target.files[0]) await uploadFile(e.target.files[0]);
+        });
+
+        async function uploadFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/upload', { method: 'POST', body: formData });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail);
+                }
+                const data = await res.json();
+                fileContent = data.content;
+
+                isProjectMode = data.is_project || false;
+                currentProjectStats = data.project_stats;
+
+                if (isProjectMode && currentProjectStats) {
+                    fileInfo.innerHTML = `📦 ${data.filename} (${(data.size / 1024).toFixed(1)} KB) - <span class="text-purple-400">${currentProjectStats.files_analyzed} files</span>`;
+                    showProjectStats(currentProjectStats);
+                } else {
+                    fileInfo.textContent = `✓ ${data.filename} (${(data.size / 1024).toFixed(1)} KB)`;
+                    hideProjectStats();
+                }
+                fileInfo.classList.remove('hidden');
+
+                if (cacheCheck.checked) await cacheContent();
+            } catch (err) {
+                alert('Upload error: ' + err.message);
+            }
+        }
+
+        async function cacheContent() {
+            try {
+                const res = await fetch('/cache-content', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file_content: fileContent })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    currentCacheId = data.cache_id;
+                    startCacheTimer(data.expires_at);
+                }
+            } catch (err) {
+                console.log('Cache failed');
+            }
+        }
+
+        // Tri-Analysis with independent error handling
+        analyzeBtn.addEventListener('click', async () => {
+            if (!fileContent) {
+                alert('Please upload a file first');
+                return;
+            }
+
+            const prompt = promptEl.value;
+            const grounding = groundingCheck.checked;
+            const generateImage = imageGenCheck.checked;
+            originalContext = `${prompt}\n\n---\nFILE CONTENT:\n${fileContent}`;
+
+            // Reset UI
+            ['low', 'medium', 'high'].forEach(level => {
+                document.getElementById(`${level}Result`).innerHTML = '<span class="animate-pulse text-gray-500">Analyzing...</span>';
+                document.getElementById(`${level}Time`).textContent = '--';
+                document.getElementById(`${level}Tokens`).textContent = '';
+                document.getElementById(`${level}Badges`).innerHTML = '';
+                document.getElementById(`${level}Grounding`).classList.add('hidden');
+            });
+            document.getElementById('highThought').classList.add('hidden');
+            iterateSection.classList.add('hidden');
+            document.getElementById('imageSection').classList.add('hidden');
+
+            analyzeBtn.disabled = true;
+            analyzeBtn.textContent = isProjectMode ? '⏳ Analyzing project...' : '⏳ Running 3 analyses...';
+
+            const levels = ['low', 'medium', 'high'];
+
+            // Independent promises - each handles its own errors
+            const promises = levels.map(async (level) => {
+                const startTime = performance.now();
+
+                try {
+                    const res = await fetch('/analyze', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            file_content: fileContent,
+                            prompt: prompt,
+                            level: level,
+                            grounding: grounding,
+                            generate_image: generateImage,
+                            cache_id: currentCacheId,
+                            project_mode: isProjectMode
+                        })
+                    });
+
+                    const clientTime = Math.round(performance.now() - startTime);
+
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || `HTTP ${res.status}`);
+                    }
+
+                    const data = await res.json();
+                    updateColumn(level, data, clientTime);
+                } catch (err) {
+                    displayError(level, err.message);
+                }
+            });
+
+            await Promise.allSettled(promises);
+
+            analyzeBtn.disabled = false;
+            analyzeBtn.textContent = '🚀 Run Tri-Analysis';
+        });
+
+        function updateColumn(level, data, clientTime) {
+            const timeEl = document.getElementById(`${level}Time`);
+            const tokensEl = document.getElementById(`${level}Tokens`);
+            const resultEl = document.getElementById(`${level}Result`);
+            const badgesEl = document.getElementById(`${level}Badges`);
+            const groundingEl = document.getElementById(`${level}Grounding`);
+
+            timeEl.textContent = `${(clientTime / 1000).toFixed(2)}s`;
+            tokensEl.textContent = `In: ${data.tokens_input} | Out: ${data.tokens_output}`;
+            resultEl.innerHTML = formatAnalysis(data.analysis);
+
+            badgesEl.innerHTML = '';
+
+            if (isProjectMode) {
+                badgesEl.innerHTML += `<span class="px-2 py-1 bg-purple-600/30 text-purple-300 text-xs rounded-full">📦 Project</span>`;
+            }
+
+            if (data.cache_hit) {
+                badgesEl.innerHTML += `<span class="px-2 py-1 bg-yellow-600/30 text-yellow-300 text-xs rounded-full">⚡ Cached</span>`;
+            }
+
+            if (data.grounded_sources && data.grounded_sources.length > 0) {
+                badgesEl.innerHTML += `<span class="px-2 py-1 bg-blue-600/30 text-blue-300 text-xs rounded-full">🔍 ${data.grounded_sources.length}</span>`;
+
+                const groundingList = groundingEl.querySelector('ul');
+                groundingList.innerHTML = data.grounded_sources.map(url =>
+                    `<li><a href="${url}" target="_blank" class="text-blue-400 hover:underline truncate block">${new URL(url).hostname}</a></li>`
+                ).join('');
+                groundingEl.classList.remove('hidden');
+            }
+
+            if (level === 'high') {
+                if (data.thought_signature) {
+                    currentSignature = data.thought_signature;
+                    badgesEl.innerHTML += `<span class="px-2 py-1 bg-purple-600/30 text-purple-300 text-xs rounded-full">🔐 Sig</span>`;
+                    iterateSection.classList.remove('hidden');
+                }
+
+                // Show thought process if available
+                if (data.thought_process) {
+                    const thoughtEl = document.getElementById('highThought');
+                    const thoughtContent = document.getElementById('highThoughtContent');
+                    thoughtContent.textContent = data.thought_process;
+                    thoughtEl.classList.remove('hidden');
+                }
+
+                if (data.code_executed) {
+                    badgesEl.innerHTML += `<span class="px-2 py-1 bg-teal-600/30 text-teal-300 text-xs rounded-full">🧪 Sandbox</span>`;
+
+                    if (data.code_result) {
+                        resultEl.innerHTML += `<div class="mt-4 p-2 bg-gray-950 rounded border border-teal-500/30"><div class="text-teal-400 text-xs font-bold mb-1">CODE OUTPUT:</div><pre class="text-xs overflow-x-auto">${data.code_result.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre></div>`;
+                    }
+                }
+
+                if (data.image_url) {
+                    badgesEl.innerHTML += `<span class="px-2 py-1 bg-pink-600/30 text-pink-300 text-xs rounded-full">🎨 Diagram</span>`;
+                    document.getElementById('generatedImage').src = data.image_url;
+                    document.getElementById('imageSection').classList.remove('hidden');
+                }
+            }
+        }
+
+        // Iteration
+        iterateBtn.addEventListener('click', async () => {
+            if (!currentSignature) return alert('No signature available');
+
+            const feedback = feedbackEl.value;
+            if (!feedback.trim()) return alert('Please enter feedback');
+
+            iterateBtn.disabled = true;
+            iterateBtn.textContent = '⏳...';
+
+            try {
+                const res = await fetch('/iterate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        signature: currentSignature,
+                        feedback: feedback,
+                        original_context: originalContext
+                    })
+                });
+
+                if (!res.ok) throw new Error((await res.json()).detail);
+
+                const data = await res.json();
+                if (data.new_signature) currentSignature = data.new_signature;
+
+                document.getElementById('iterateResult').classList.remove('hidden');
+                document.getElementById('refinedText').innerHTML = formatAnalysis(data.refined_analysis);
+            } catch (err) {
+                alert('Error: ' + err.message);
+            } finally {
+                iterateBtn.disabled = false;
+                iterateBtn.textContent = 'Iterate';
+            }
+        });
+    </script>
+</body>
+
+</html>
